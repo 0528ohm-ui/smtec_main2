@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>측정기 종합현황 v1.1</title>
+<title>측정기 종합현황 v1.2</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;900&display=swap">
 <style>
   :root{--bg:#0f172a;--surface:#1e293b;--surface2:#334155;--border:#475569;--accent:#38bdf8;--ok:#22c55e;--warn:#f59e0b;--ng:#ef4444;--text:#e2e8f0;--text2:#94a3b8;--text3:#64748b}
@@ -431,6 +431,25 @@ function askBulk(period){
 }
 window.askBulk = askBulk;
 
+// ESG 메인 시스템 로그인 정보 (개별 페이지와 동일 패턴)
+function getEsgAuth(){
+  try{
+    const a = JSON.parse(localStorage.getItem('esg_pin_auth')||'null');
+    if(!a || !a.pin || !a.name) return null;
+    if(a.exp && Date.now() > a.exp) return null;
+    return {pin:String(a.pin), name:String(a.name)};
+  }catch(e){ return null; }
+}
+
+// 로컬(KST) 시간 HH:MM:SS
+function nowKSTTime(){
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2,'0');
+  const mm = String(now.getMinutes()).padStart(2,'0');
+  const ss = String(now.getSeconds()).padStart(2,'0');
+  return hh+':'+mm+':'+ss;
+}
+
 async function upsertEqLog(eqName, period, items){
   // 해당 주기 항목만 OK로 저장. 같은 날짜+장비 기존 row가 있으면 items_json을 merge하여 PATCH, 없으면 POST.
   const today = todayKST();
@@ -444,22 +463,30 @@ async function upsertEqLog(eqName, period, items){
   if(!qr.ok) throw new Error('조회실패 HTTP '+qr.status);
   const exist = await qr.json();
 
-  const nowIso = nowKSTISO();
-  // OK 결과 객체
+  // items_json은 개별 페이지와 동일하게 { 라벨: 'OK' } 단순 문자열 형식으로 통일
+  // (객체로 저장하면 개별 페이지의 calcDueMap이 도래 인식 못함)
   const okItems = {};
-  targetItems.forEach(it=>{
-    okItems[it.label] = { result:'OK', value:'', memo:'', period:Number(it.period)||1, checked_at: nowIso };
-  });
+  targetItems.forEach(it=>{ okItems[it.label] = 'OK'; });
+
+  // 점검자: ESG 로그인 우선, 없으면 '일괄완료'
+  const auth = getEsgAuth();
+  const inspector = auth ? auth.name : '일괄완료';
 
   if(exist && exist.length>0){
-    // 기존 items_json과 merge
+    // 기존 row와 merge → PATCH (items_json만 갱신)
     const cur = exist[0].items_json || {};
     const merged = Object.assign({}, cur, okItems);
+    // NG 개수 재계산 (값이 'NG' 문자열인 것만 카운트)
+    const ng = Object.values(merged).filter(v => v==='NG').length;
     const patchUrl = SB_URL + '/rest/v1/qc_measure_log?id=eq.' + exist[0].id;
     const pr = await fetch(patchUrl, {
       method:'PATCH',
       headers: SB_HEADERS_POST,
-      body: JSON.stringify({ items_json: merged, last_modified_at: nowIso })
+      body: JSON.stringify({
+        items_json: merged,
+        ng_count: ng,
+        result: ng>0?'NG':'OK'
+      })
     });
     if(!pr.ok){
       const txt = await pr.text();
@@ -467,15 +494,17 @@ async function upsertEqLog(eqName, period, items){
     }
     return {updated:true, items:Object.keys(okItems).length};
   } else {
-    // 신규 row
+    // 신규 row — 실제 테이블 컬럼명에 맞춘 페이로드
     const postUrl = SB_URL + '/rest/v1/qc_measure_log';
     const payload = {
-      equipment: eqName,
       check_date: today,
+      check_time: nowKSTTime(),
+      inspector: inspector,
+      equipment: eqName,
       items_json: okItems,
-      checker: '일괄완료',
-      overall_result: 'OK',
-      created_at: nowIso
+      ng_count: 0,
+      result: 'OK',
+      memo: '대시보드 일괄 OK'
     };
     const pr = await fetch(postUrl, {
       method:'POST',
@@ -484,17 +513,7 @@ async function upsertEqLog(eqName, period, items){
     });
     if(!pr.ok){
       const txt = await pr.text();
-      // overall_result나 checker 컬럼이 없을 수도 있으므로 최소 페이로드 재시도
-      const minimal = { equipment:eqName, check_date:today, items_json:okItems };
-      const pr2 = await fetch(postUrl, {
-        method:'POST',
-        headers: SB_HEADERS_POST,
-        body: JSON.stringify(minimal)
-      });
-      if(!pr2.ok){
-        const t2 = await pr2.text();
-        throw new Error('POST 실패 HTTP '+pr2.status+' '+t2);
-      }
+      throw new Error('POST 실패 HTTP '+pr.status+' '+txt);
     }
     return {inserted:true, items:Object.keys(okItems).length};
   }
