@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>측정기 일상점검 v2.2</title>
+<title>측정기 일상점검 v2.3</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;900&display=swap">
 <style>
   :root{--bg:#0f172a;--surface:#1e293b;--surface2:#334155;--border:#475569;--accent:#38bdf8;--accent2:#0ea5e9;--ok:#22c55e;--ok-bg:rgba(34,197,94,.12);--ng:#ef4444;--ng-bg:rgba(239,68,68,.12);--text:#e2e8f0;--text2:#94a3b8;--text3:#64748b;--radius:12px}
@@ -666,19 +666,13 @@ document.getElementById('inspectionForm').addEventListener('submit', async funct
   btn.disabled = true; btn.textContent = '저장 중...';
   try{
     await sbInsert('qc_measure_log', row);
-    toast('✅ 제출 완료','success');
-    document.querySelectorAll('input[type=radio]').forEach(function(r){ r.checked=false; });
-    document.querySelectorAll('.check-item').forEach(function(it){ it.classList.remove('checked-ok','checked-ng'); });
-    document.querySelectorAll('.okng-btn').forEach(function(b){ b.classList.remove('ok-selected','ng-selected'); });
-    document.getElementById('memo').value = '';
-    document.getElementById('memo').value = '';
-    initDateTime();
-    // 점검 직후 도래 상태 재계산 + 화면 갱신 (방금 점검한 항목은 미도래로 변경됨)
-    await calcDueMap();
-    renderChecklist();
+    toast('✅ 제출 완료 · 대시보드로 이동','success');
+    // 토스트 잠깐 보이고 대시보드 복귀
+    setTimeout(function(){
+      location.href = 'QC_measure_dashboard.html';
+    }, 800);
   }catch(err){
     toast('❌ 저장 실패: '+err.message,'error');
-  }finally{
     btn.disabled = false; btn.textContent = orig;
   }
 });
@@ -809,9 +803,15 @@ function escapeHtml(s){
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 function initDateTime(){
+  // toISOString()은 UTC라 KST 새벽엔 날짜가 전날로 밀림 → 로컬 시간 직접 조립
   const now = new Date();
-  document.getElementById('checkDate').value = now.toISOString().slice(0,10);
-  document.getElementById('checkTime').value = now.toTimeString().slice(0,5);
+  const y = now.getFullYear();
+  const m = String(now.getMonth()+1).padStart(2,'0');
+  const d = String(now.getDate()).padStart(2,'0');
+  const hh = String(now.getHours()).padStart(2,'0');
+  const mm = String(now.getMinutes()).padStart(2,'0');
+  document.getElementById('checkDate').value = y+'-'+m+'-'+d;
+  document.getElementById('checkTime').value = hh+':'+mm;
 }
 
 window.addEventListener('DOMContentLoaded', async function(){
