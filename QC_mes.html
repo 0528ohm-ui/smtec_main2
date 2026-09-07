@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SHOT 카운터 모니터 v3.6</title>
+<title>SHOT 카운터 모니터 v3.7</title>
 <style>
   :root{
     --bg:#0f1419; --panel:#1a2332; --border:#2a3a52;
@@ -193,7 +193,7 @@
 <body>
 
 <div class="header">
-  <h1>📡 SHOT 카운터 모니터 v3.6</h1>
+  <h1>📡 SHOT 카운터 모니터 v3.7</h1>
   <div class="meta">
     <span><span class="status-dot" id="connDot"></span><b id="connText">연결 확인 중</b></span>
     <span>장비: <b id="deviceCount">0</b></span>
@@ -234,7 +234,8 @@
   const SUPABASE_KEY = 'sb_publishable_9j2YkkL-7ul1TrhH-NjVdQ_vWDG2-1D';
   const TABLE = 'shot_count';
   const BASELINE_TABLE = 'daily_baseline';
-  const POLL_MS = 2000;
+  const POLL_MS = 5000;   // v3.7: 2초 → 5초 (요청량 60% 감소)
+  const POLL_MAX_MS = 60000;  // 실패 시 백오프 상한
   const RECENT_THRESHOLD_MS = 10000;
   const DI_LIST = ['DI1','DI2','DI3','DI4','DI5','DI6','DI7','DI8'];
   const S_LIST  = ['S1','S2'];   // 보드당 신호 2개 (1설비 2신호)
@@ -322,10 +323,17 @@
   }
 
   // ===== Supabase 조회 =====
+  // v3.7: 기존에는 800행을 받아와 코드별 최신 1건만 쓰고 전부 버렸다.
+  //       shot_count_latest 뷰(DISTINCT ON)로 설비 수만큼(약 16행)만 받는다.
+  //       뷰가 아직 없는 환경에서는 1회 실패 후 기존 방식으로 자동 폴백.
+  let useLatestView = true;
   async function fetchLatest(){
-    const url = `${SUPABASE_URL}/rest/v1/${TABLE}` +
-                `?machine_code=in.(${ALL_CODES.join(',')})` +
-                `&order=created_at.desc&limit=800`;
+    const url = useLatestView
+      ? `${SUPABASE_URL}/rest/v1/shot_count_latest` +
+        `?machine_code=in.(${ALL_CODES.join(',')})&select=*`
+      : `${SUPABASE_URL}/rest/v1/${TABLE}` +
+        `?machine_code=in.(${ALL_CODES.join(',')})` +
+        `&order=created_at.desc&limit=800`;
     try{
       const res = await fetch(url, {
         headers:{
@@ -333,7 +341,14 @@
           'Authorization': 'Bearer ' + SUPABASE_KEY
         }
       });
-      if(!res.ok){ setConn(false, `HTTP ${res.status}`); return null; }
+      if(!res.ok){
+        if(useLatestView && (res.status===404 || res.status===400)){
+          useLatestView = false;          // 뷰 미생성 → 기존 방식으로 폴백
+          console.warn('[fetchLatest] shot_count_latest 뷰 없음 → 원본 테이블 사용');
+          return await fetchLatest();
+        }
+        setConn(false, `HTTP ${res.status}`); return null;
+      }
       const data = await res.json();
       setConn(true, '연결됨');
       console.log('[fetchLatest] rows:', Array.isArray(data) ? data.length : data);
@@ -758,6 +773,7 @@
   // ===== 메인 폴링 =====
   async function tick(){
     const rows = await fetchLatest();
+    if(!rows) return false;
     if(rows){
       const grouped = processRows(rows);
       lastGrouped = grouped;                 // 제로세팅용
@@ -769,6 +785,7 @@
         console.error('[render error]', e);
       }
     }
+    return true;
   }
 
   // baseline 자정 자동 갱신 체크 (날짜 바뀌면 재로드)
@@ -786,7 +803,29 @@
     await loadMapping();   // 서버에서 매핑 먼저 로드 (실패 시 localStorage 폴백)
     loadBaselines().catch(e => console.error('baseline init', e));
     tick();
-    setInterval(async ()=>{ await checkDayRollover(); tick(); }, POLL_MS);
+    // v3.7 폭주 방지: 이전 사이클이 끝나기 전 재진입 금지 + 실패 시 지수 백오프.
+    //   기존 setInterval(async ...) 은 응답이 늦어도 2초마다 새 요청을 쌓아
+    //   서버가 느려질수록 요청이 누적되는 구조였다.
+    let busy = false, fail = 0, delay = POLL_MS;
+    (function schedule(){
+      setTimeout(async function run(){
+        if(!busy){
+          busy = true;
+          try{
+            await checkDayRollover();
+            const ok = await tick();
+            fail = (ok === false) ? fail + 1 : 0;
+          }catch(e){
+            fail++;
+            console.error('[poll]', e);
+          }finally{
+            busy = false;
+          }
+          delay = fail ? Math.min(POLL_MS * Math.pow(2, fail), POLL_MAX_MS) : POLL_MS;
+        }
+        schedule();
+      }, delay);
+    })();
   })();
 </script>
 

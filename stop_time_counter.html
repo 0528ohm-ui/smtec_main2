@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>생산 카운터 v3.10</title>
+<title>생산 카운터 v3.11</title>
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body {
@@ -1125,7 +1125,7 @@
 </head>
 <body>
 
-<h1>🕒 생산 카운터 v3.10</h1>
+<h1>🕒 생산 카운터 v3.11</h1>
 
 <!-- ★ Supabase 연동: 호기/작업자 + 작업시작/종료 -->
 <div class="work-header">
@@ -2603,12 +2603,17 @@ async function syncWorkLog(complete = false) {
   }
 }
 
+let _autoSyncBusy = false;
 function startSyncTimer() {
   stopSyncTimer();
-  // 30초마다 자동 동기화
+  // 30초마다 자동 동기화 (v3.11: 이전 동기화 미완료 시 건너뛰어 요청 누적 방지)
   workSession.syncTimer = setInterval(() => {
+    if (_autoSyncBusy) return;
     if (workSession.active && workSession.workLogId) {
-      syncWorkLog(false).catch(e => console.log('자동 동기화 실패:', e));
+      _autoSyncBusy = true;
+      syncWorkLog(false)
+        .catch(e => console.log('자동 동기화 실패:', e))
+        .finally(() => { _autoSyncBusy = false; });
     }
   }, 30000);
 }

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>가상설비 모니터링 v3.0</title>
+<title>가상설비 모니터링 v3.1</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
@@ -76,7 +76,7 @@ body{font-family:'Noto Sans KR',sans-serif;background:var(--bg);color:var(--txt)
 <body>
 <div class="hdr">
   <div>
-    <h1>🟣 가상설비 모니터링 v3.0</h1>
+    <h1>🟣 가상설비 모니터링 v3.1</h1>
     <div class="sub"><span class="dot" id="dot"></span><span id="lastUpdate">-</span> │ <span id="countdown">30초 갱신</span></div>
   </div>
   <a href="index.html" class="back">← 메뉴</a>
@@ -125,6 +125,7 @@ async function sbGet(t,q){
 }
 
 var timer=30,curFilter='ALL',cachedData=null,curMachine=null;
+var vBusy=false,vFail=0;   // v3.1: 중복 진입 차단 / 실패 백오프
 var toastT;
 function showToast(m,ms){
   var t=document.getElementById('toast');t.textContent=m;t.classList.add('show');
@@ -437,8 +438,18 @@ async function init(){
 }
 
 setInterval(function(){
-  timer--;
-  if(timer<=0){timer=30;loadVirtual().catch(function(e){console.log('재로드 실패:',e)})}
+  if(timer>0)timer--;
+  if(timer<=0&&!vBusy){
+    timer=30;
+    vBusy=true;
+    loadVirtual().then(function(){
+      vFail=0;
+    }).catch(function(e){
+      vFail++;
+      timer=Math.min(30*Math.pow(2,vFail),600);   // 60→120→…→600초
+      console.log('재로드 실패:',e);
+    }).finally(function(){ vBusy=false });
+  }
   document.getElementById('countdown').textContent='갱신:'+Math.floor(timer/60)+':'+String(timer%60).padStart(2,'0');
 },1000);
 
