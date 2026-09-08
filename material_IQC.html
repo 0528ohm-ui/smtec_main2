@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>소재 수입검사 v3.7 | (주)태진다이텍</title>
+<title>소재 수입검사 v3.8 | (주)태진다이텍</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Malgun Gothic','맑은 고딕','Segoe UI',sans-serif;background:#f4f6f9;color:#222;font-size:14px;line-height:1.5}
@@ -143,7 +143,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}
 
 <div class="hdr">
   <div>
-    <h1>📋 소재 수입검사 시스템 v3.7</h1>
+    <h1>📋 소재 수입검사 시스템 v3.8</h1>
     <div class="sub">(주)태진다이텍 · 품질관리팀 · 그룹 자동 통합 (공급자+재질+두께+폭)</div>
   </div>
   <div class="user-info" id="userInfoBar">검사자: <b id="loginUser">로그인 필요</b></div>
@@ -467,6 +467,7 @@ let raw = [];        // inspection_certs 원본 (코일별)
 let inspections = loadInsps();  // 그룹별 검사 결과 (LOT 그룹 단위)
 let _modalBackup = null;   // 모달 열기 전 상태 백업 (취소 시 복원용)
 let _editTargetIdx = -1;   // [v3.6] 수정 버튼으로 연 경우: inspections 배열의 정확한 인덱스
+let _deletingInsp = false; // [v3.8] 검사완료 삭제 중복 클릭 방지
 let currentUser = getLoginUser();
 
 /* ================ 로그인 정보 ================ */
@@ -696,6 +697,7 @@ function mergeServerInspections(serverInsps){
 
     // 서버 row → 로컬 형식 변환
     const srvInsp = {
+      srvId: srv.id != null ? srv.id : null,   /* [v3.8] 서버 row id 보존 - 삭제 시 사용 */
       groupKey: k,
       certNo: srv.cert_no || '',
       supplier: srv.supplier || '',
@@ -805,11 +807,79 @@ async function pushInspToSupabase(insp){
       }catch(e){}
       return { ok: false, status: res.status, code, error: hint || txt.substring(0, 200) };
     }
-    return { ok: true };
+    /* [v3.8] 서버 row id 회수 → 이후 삭제 시 id로 정확히 지정 */
+    try{
+      const rows = await res.json();
+      if(Array.isArray(rows) && rows[0] && rows[0].id != null) insp.srvId = rows[0].id;
+    }catch(e){}
+    return { ok: true, id: insp.srvId };
   }catch(e){
     console.error('[push insp]', e);
     return { ok: false, error: e.message || String(e) };
   }
+}
+
+/* ================ [v3.8] 검사완료(iqc_inspections) 서버 삭제 ================
+   삭제 대상 특정 우선순위:
+   ① srvId (서버 PK)
+   ② group_key + receipt_date  (upsert 유니크 키)
+   ③ cert_no                   (성적서 번호)
+   - 한 건이라도 지워지면 성공 처리
+   - 테이블 자체가 없으면(404/PGRST205) 로컬 전용으로 간주하여 성공 처리
+*/
+async function deleteInspFromSupabase(insp){
+  const headers = {
+    'apikey': SB_KEY,
+    'Authorization': 'Bearer ' + SB_KEY,
+    'Content-Type': 'application/json',
+    'Prefer': 'return=representation'
+  };
+
+  const targets = [];
+  if(insp.srvId != null && insp.srvId !== ''){
+    targets.push('id=eq.' + encodeURIComponent(insp.srvId));
+  }
+  if(insp.groupKey){
+    targets.push('group_key=eq.' + encodeURIComponent(insp.groupKey) +
+      '&receipt_date=' + (insp.recvDate ? 'eq.' + encodeURIComponent(insp.recvDate) : 'is.null'));
+  }
+  if(insp.certNo){
+    targets.push('cert_no=eq.' + encodeURIComponent(insp.certNo));
+  }
+  if(!targets.length) return { ok: true, deleted: 0, note: '서버 식별자 없음(로컬 전용)' };
+
+  let lastError = '';
+  let totalDeleted = 0;
+
+  for(const q of targets){
+    try{
+      const res = await fetch(SB_URL + '/rest/v1/iqc_inspections?' + q, { method: 'DELETE', headers });
+      if(res.ok){
+        let n = 0;
+        try{
+          const rows = await res.json();
+          n = Array.isArray(rows) ? rows.length : 0;
+        }catch(e){ n = 0; }
+        totalDeleted += n;
+        if(n > 0) return { ok: true, deleted: totalDeleted };
+        continue;   // 0건이면 다음 조건으로 재시도
+      }
+      const txt = await res.text();
+      if(res.status === 404 || /PGRST205|relation .* does not exist/i.test(txt)){
+        return { ok: true, deleted: 0, note: 'iqc_inspections 테이블 없음(로컬 전용)' };
+      }
+      lastError = `HTTP ${res.status}: ${txt.substring(0,150)}`;
+      if(res.status === 401 || res.status === 403 || /42501/.test(txt)){
+        lastError += ' (RLS 권한 - GRANT DELETE ON iqc_inspections TO anon 필요)';
+        break;
+      }
+    }catch(e){
+      lastError = e.message || String(e);
+    }
+  }
+
+  if(lastError) return { ok: false, deleted: totalDeleted, error: lastError };
+  return { ok: true, deleted: totalDeleted, note: '서버에 해당 행 없음' };
 }
 
 /* ================ 검사 대기 그룹 산출 ================ */
@@ -2094,17 +2164,70 @@ function reEditInsp(idx){
   openInsp(d.groupKey, idx);   // [v3.6] 정확한 레코드 인덱스 전달
 }
 
-function deleteInsp(idx){
+/* [v3.8] 삭제 = 서버(iqc_inspections) + 로컬 동시 삭제
+   기존 v3.7은 로컬 배열만 splice → 다음 동기화 때 서버 행이 다시 병합되어
+   "삭제해도 그대로 남는" 현상이 발생했음 */
+async function deleteInsp(idx){
   const d = inspections[idx];
   if(!d) return;
-  if(!confirm(`성적서 ${d.certNo}을(를) 삭제하시겠습니까?\n\n· 검사 대기 목록으로 다시 표시됩니다\n· inspection_certs의 final_judge는 '대기'로 되돌려집니다`)) return;
-  inspections.splice(idx, 1);
-  saveInspsToLS();
-  updateRawFinalJudge(d.certIds || [], '대기').catch(()=>{});
-  raw.forEach(r => { if((d.certIds||[]).includes(r.id)) r.final_judge = '대기'; });
-  renderWait();
-  renderDone();
-  showToast('🗑 성적서 삭제 완료');
+  if(_deletingInsp){ showToast('⏳ 이전 삭제 처리 중입니다'); return; }
+
+  if(!confirm(
+    `성적서 ${d.certNo || '(번호없음)'}을(를) 삭제하시겠습니까?\n\n` +
+    `· 서버 iqc_inspections 레코드가 영구 삭제됩니다\n` +
+    `· 검사 대기 목록으로 다시 표시됩니다\n` +
+    `· inspection_certs의 final_judge는 '대기'로 되돌려집니다`
+  )) return;
+
+  _deletingInsp = true;
+  showToast('⏳ 삭제 중...');
+
+  try{
+    // ① 서버 삭제
+    const srv = await deleteInspFromSupabase(d);
+    if(!srv.ok){
+      const goOn = confirm(
+        `⚠ 서버 삭제 실패\n\n${srv.error}\n\n` +
+        `이 PC에서만 지우면 다음 동기화 시 다시 나타납니다.\n그래도 진행하시겠습니까?`
+      );
+      if(!goOn){ showToast('❌ 삭제 취소됨'); return; }
+    }
+
+    // ② 로컬 삭제 - 같은 레코드가 병합으로 중복 적재된 경우까지 모두 제거
+    const key = inspKeyOf(d.groupKey, d.recvDate);
+    const before = inspections.length;
+    inspections = inspections.filter(x => {
+      if(x === d) return false;
+      if(d.certNo && x.certNo === d.certNo) return false;                 // 성적서 번호 동일
+      if(d.srvId != null && x.srvId != null && x.srvId === d.srvId) return false;
+      if(inspKeyOf(x.groupKey, x.recvDate) === key) return false;         // 그룹키+입고일 동일
+      return true;
+    });
+    const removed = before - inspections.length;
+    saveInspsToLS();
+
+    // ③ inspection_certs.final_judge → '대기' 복구
+    const cids = d.certIds || [];
+    let patch = { ok: 0, fail: 0 };
+    if(cids.length){
+      patch = await updateRawFinalJudge(cids, '대기');
+      raw.forEach(r => { if(cids.includes(r.id)) r.final_judge = '대기'; });
+    }
+
+    // ④ 재렌더 (하나가 실패해도 나머지는 갱신되도록 분리)
+    try{ renderWait(); }catch(e){ console.warn('[renderWait]', e); }
+    try{ renderDone(); }catch(e){ console.warn('[renderDone]', e); }
+    try{ renderCfg(); }catch(e){}
+
+    const msg = `🗑 삭제 완료 (로컬 ${removed}건 / 서버 ${srv.deleted || 0}건` +
+                (cids.length ? ` / 대기복구 ${patch.ok}건` : '') + ')';
+    showToast(msg);
+  }catch(e){
+    console.error('[deleteInsp]', e);
+    alert('❌ 삭제 처리 중 오류\n\n' + (e.message || e));
+  }finally{
+    _deletingInsp = false;
+  }
 }
 
 /* ================ 성적서 미리보기 ================ */
